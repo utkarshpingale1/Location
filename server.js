@@ -278,6 +278,10 @@ app.get('/api/admin/location-trail/:session_id', auth, admin, async (req, res) =
 // ── Start ──────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 5000;
 
+app.get("/", (req, res) => {
+    res.send("GPS Tracker Backend Running");
+});
+
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on ${PORT}`);
 });
