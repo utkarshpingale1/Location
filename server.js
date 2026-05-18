@@ -10,7 +10,7 @@ app.use(express.json());
 app.use(cors());
 
 // ─── MongoDB Connection ────────────────────────────────────────────────────
-mongoose.connect(process.env.MONGO_URI, {dbName: 'login_user'})
+mongoose.connect(process.env.MONGO_URI, { dbName: 'attendance_db' })
   .then(() => console.log('✅ MongoDB connected'))
   .catch(err => { console.error('❌ MongoDB error:', err.message); process.exit(1); });
 
@@ -19,8 +19,7 @@ mongoose.connect(process.env.MONGO_URI, {dbName: 'login_user'})
 const userSchema = new mongoose.Schema({
   name:          { type: String, required: true },
   email:         { type: String, required: true, unique: true, lowercase: true },
-  password:      { type: String },
-  password_hash: { type: String },
+  password_hash: { type: String, required: true },
   role:          { type: String, enum: ['admin', 'employee'], default: 'employee' },
 }, { timestamps: true });
 
@@ -104,14 +103,10 @@ app.post('/api/register', async (req, res) => {
 app.post('/api/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-
     const user = await User.findOne({ email: email?.toLowerCase() });
     if (!user) return res.status(401).json({ error: 'Invalid credentials' });
 
-    let ok = false;
-    if (user.password)      ok = password === user.password;
-    else if (user.password_hash) ok = await bcrypt.compare(password, user.password_hash);
-
+    const ok = await bcrypt.compare(password, user.password_hash);
     if (!ok) return res.status(401).json({ error: 'Invalid credentials' });
 
     const token = jwt.sign(
@@ -119,11 +114,7 @@ app.post('/api/login', async (req, res) => {
       process.env.JWT_SECRET || 'supersecret',
       { expiresIn: '12h' }
     );
-
-    res.json({
-      token,
-      user: { id: user._id, name: user.name, email: user.email, role: user.role }
-    });
+    res.json({ token, user: { id: user._id, name: user.name, email: user.email, role: user.role } });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -133,20 +124,17 @@ app.post('/api/login', async (req, res) => {
 app.post('/api/attendance/clock-in', auth, async (req, res) => {
   try {
     const { lat, lng } = req.body;
-
-    const existing = await Attendance.findOne({ user_id: req.user.id, clock_out: null });
-    if (existing) return res.json({ session: existing, alreadyClockedIn: true });
+    const open = await Attendance.findOne({ user_id: req.user.id, clock_out: null });
+    if (open) return res.status(400).json({ error: 'Already clocked in' });
 
     const session = await Attendance.create({
-      user_id:      req.user.id,
-      clock_in:     new Date(),
+      user_id: req.user.id,
+      clock_in: new Date(),
       clock_in_lat: lat,
       clock_in_lng: lng,
     });
-
-    res.json({ session });
+    res.json({ session_id: session._id, clocked_in: session.clock_in });
   } catch (e) {
-    console.log(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -202,7 +190,6 @@ app.get('/api/attendance/me', auth, async (req, res) => {
 // ── Admin ─────────────────────────────────────────────────────────────────────
 
 // Live locations (latest ping per user)
-// FIX: now includes clock_in_lat and clock_in_lng from the attendance session
 app.get('/api/admin/live-locations', auth, admin, async (req, res) => {
   try {
     const locs = await Location.aggregate([
@@ -225,22 +212,16 @@ app.get('/api/admin/live-locations', auth, admin, async (req, res) => {
     const sessions   = await Attendance.find({ _id: { $in: sessionIds } }).lean();
     const sMap       = Object.fromEntries(sessions.map(s => [s._id.toString(), s]));
 
-    res.json(locs.map(l => {
-      const session = l.session_id ? sMap[l.session_id.toString()] : null;
-      return {
-        user_id:      l._id,
-        name:         uMap[l._id.toString()] || 'Unknown',
-        lat:          l.lat,
-        lng:          l.lng,
-        accuracy:     l.accuracy,
-        recorded_at:  l.recorded_at,
-        session_id:   l.session_id,
-        clock_in:     session?.clock_in     ?? null,
-        // ✅ FIX: these were missing — needed by frontend to draw origin dot
-        clock_in_lat: session?.clock_in_lat ?? null,
-        clock_in_lng: session?.clock_in_lng ?? null,
-      };
-    }));
+    res.json(locs.map(l => ({
+      user_id:     l._id,
+      name:        uMap[l._id.toString()] || 'Unknown',
+      lat:         l.lat,
+      lng:         l.lng,
+      accuracy:    l.accuracy,
+      recorded_at: l.recorded_at,
+      session_id:  l.session_id,
+      clock_in:    l.session_id ? sMap[l.session_id.toString()]?.clock_in : null,
+    })));
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -284,27 +265,31 @@ app.get('/api/admin/users', auth, admin, async (req, res) => {
 });
 
 // Location trail for a session
-// FIX: was sorting by createdAt (doesn't exist) — now correctly sorts by recorded_at
-app.get('/api/admin/location-trail/:sessionId', auth, async (req, res) => {
+app.get('/api/admin/location-trail/:session_id', auth, admin, async (req, res) => {
   try {
-    const trail = await Location.find({
-      session_id: new mongoose.Types.ObjectId(req.params.sessionId)
-    }).sort({ recorded_at: 1 });
-
+    const trail = await Location.find({ session_id: req.params.session_id })
+      .sort({ recorded_at: 1 }).lean();
     res.json(trail);
   } catch (e) {
-    console.log(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Location trail for a user (today's pings, for live path drawing)
+app.get('/api/admin/location-trail/user/:user_id', auth, admin, async (req, res) => {
+  try {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    const trail = await Location.find({
+      user_id: req.params.user_id,
+      recorded_at: { $gte: start },
+    }).sort({ recorded_at: 1 }).lean();
+    res.json(trail);
+  } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
 // ── Start ──────────────────────────────────────────────────────────────────────
-const PORT = process.env.PORT || 5000;
-
-app.get('/', (req, res) => {
-  res.send('GPS Tracker Backend Running');
-});
-
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on ${PORT}`);
-});
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
