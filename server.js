@@ -100,25 +100,26 @@ app.post('/api/register', async (req, res) => {
 });
 
 // Login
-app.post('/api/login', async (req, res) => {
-  try {
-    const { email, password } = req.body;
-    const user = await User.findOne({ email: email?.toLowerCase() });
-    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+let ok = false;
 
-    const ok = password === user.password;
-    if (!ok) return res.status(401).json({ error: 'Invalid credentials' });
+// Old plain-text migrated users
+if (user.password) {
+  ok = password === user.password;
+}
 
-    const token = jwt.sign(
-      { id: user._id.toString(), name: user.name, role: user.role },
-      process.env.JWT_SECRET || 'supersecret',
-      { expiresIn: '12h' }
-    );
-    res.json({ token, user: { id: user._id, name: user.name, email: user.email, role: user.role } });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
+// New bcrypt users
+else if (user.password_hash) {
+  ok = await bcrypt.compare(
+    password,
+    user.password_hash
+  );
+}
+
+if (!ok) {
+  return res.status(401).json({
+    error: 'Invalid credentials'
+  });
+}
 
 // Clock In
 app.post('/api/attendance/clock-in', auth, async (req, res) => {
