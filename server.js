@@ -101,23 +101,111 @@ app.post('/api/register', async (req, res) => {
 
 // Login
 app.post('/api/login', async (req, res) => {
-  try {
-    const { email, password } = req.body;
-    const user = await User.findOne({ email: email?.toLowerCase() });
-    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
 
-    const ok = await bcrypt.compare(password, user.password_hash);
-    if (!ok) return res.status(401).json({ error: 'Invalid credentials' });
+  try {
+
+    const { email, password } = req.body;
+
+    // Find user
+    const user = await User.findOne({
+      email: email
+    });
+
+    if (!user) {
+
+      return res.status(401).json({
+        error: 'Invalid credentials'
+      });
+
+    }
+
+    // =========================================
+    // PASSWORD VALIDATION
+    // =========================================
+
+    let ok = false;
+
+    // OLD migrated PostgreSQL users
+    if (
+      user.password &&
+      typeof user.password === 'string'
+    ) {
+
+      ok = password === user.password;
+
+    }
+
+    // NEW bcrypt users
+    else if (
+      user.password_hash &&
+      typeof user.password_hash === 'string'
+    ) {
+
+      ok = await bcrypt.compare(
+        password,
+        user.password_hash
+      );
+
+    }
+
+    // Invalid password
+    if (!ok) {
+
+      return res.status(401).json({
+        error: 'Invalid credentials'
+      });
+
+    }
+
+    // =========================================
+    // CREATE JWT TOKEN
+    // =========================================
 
     const token = jwt.sign(
-      { id: user._id.toString(), name: user.name, role: user.role },
+
+      {
+        id: user._id.toString(),
+        name: user.name,
+        role: user.role
+      },
+
       process.env.JWT_SECRET || 'supersecret',
-      { expiresIn: '12h' }
+
+      {
+        expiresIn: '12h'
+      }
+
     );
-    res.json({ token, user: { id: user._id, name: user.name, email: user.email, role: user.role } });
+
+    // =========================================
+    // RESPONSE
+    // =========================================
+
+    res.json({
+
+      token,
+
+      user: {
+
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role
+
+      }
+
+    });
+
   } catch (e) {
-    res.status(500).json({ error: e.message });
+
+    console.log(e);
+
+    res.status(500).json({
+      error: e.message
+    });
+
   }
+
 });
 
 // Clock In
