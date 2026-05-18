@@ -17,10 +17,37 @@ mongoose.connect(process.env.MONGO_URI, { dbName: 'login_user' })
 // ─── Schemas & Models ──────────────────────────────────────────────────────
 
 const userSchema = new mongoose.Schema({
-  name:          { type: String, required: true },
-  email:         { type: String, required: true, unique: true, lowercase: true },
-  password_hash: { type: String, required: true },
-  role:          { type: String, enum: ['admin', 'employee'], default: 'employee' },
+
+  name: {
+    type: String,
+    required: true
+  },
+
+  email: {
+    type: String,
+    required: true,
+    unique: true,
+    lowercase: true
+  },
+
+  // For migrated PostgreSQL users
+  password: {
+    type: String,
+    default: null
+  },
+
+  // For bcrypt users
+  password_hash: {
+    type: String,
+    default: null
+  },
+
+  role: {
+    type: String,
+    enum: ['admin', 'employee'],
+    default: 'employee'
+  },
+
 }, { timestamps: true });
 
 const attendanceSchema = new mongoose.Schema({
@@ -379,5 +406,5 @@ app.get('/api/admin/location-trail/user/:user_id', auth, admin, async (req, res)
 });
 
 // ── Start ──────────────────────────────────────────────────────────────────────
-const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server running on port ${PORT}`));
