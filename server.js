@@ -10,7 +10,7 @@ app.use(express.json());
 app.use(cors());
 
 // ─── MongoDB Connection ────────────────────────────────────────────────────
-mongoose.connect(process.env.MONGO_URI, { dbName: 'attendance_db' })
+mongoose.connect(process.env.MONGO_URI, {dbName: 'login_user'})
   .then(() => console.log('✅ MongoDB connected'))
   .catch(err => { console.error('❌ MongoDB error:', err.message); process.exit(1); });
 
@@ -19,7 +19,8 @@ mongoose.connect(process.env.MONGO_URI, { dbName: 'attendance_db' })
 const userSchema = new mongoose.Schema({
   name:          { type: String, required: true },
   email:         { type: String, required: true, unique: true, lowercase: true },
-  password_hash: { type: String, required: true },
+  password:      { type: String },
+  password_hash: { type: String },
   role:          { type: String, enum: ['admin', 'employee'], default: 'employee' },
 }, { timestamps: true });
 
@@ -100,7 +101,6 @@ app.post('/api/register', async (req, res) => {
 });
 
 // Login
-// Login
 app.post('/api/login', async (req, res) => {
 
   try {
@@ -119,14 +119,14 @@ app.post('/api/login', async (req, res) => {
 
     let ok = false;
 
-    // Old migrated plain-text users
+    // Migrated PostgreSQL users
     if (user.password) {
 
       ok = password === user.password;
 
     }
 
-    // New bcrypt users
+    // Newly registered bcrypt users
     else if (user.password_hash) {
 
       ok = await bcrypt.compare(
@@ -173,6 +173,7 @@ app.post('/api/login', async (req, res) => {
   }
 
 });
+
 
 // Clock Out
 app.post('/api/attendance/clock-out', auth, async (req, res) => {
