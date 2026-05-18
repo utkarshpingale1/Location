@@ -363,13 +363,9 @@ app.get(
       const mongoose = require('mongoose');
 
       const trail = await Location.find({
-
-        session_id: new mongoose.Types.ObjectId(
-          req.params.sessionId
-        )
-
-      })
-      .sort({ createdAt: 1 });
+      session_id: new mongoose.Types.ObjectId(req.params.sessionId)
+    })
+    .sort({ recorded_at: 1 });
 
       res.json(trail);
 
