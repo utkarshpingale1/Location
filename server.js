@@ -100,44 +100,78 @@ app.post('/api/register', async (req, res) => {
 });
 
 // Login
-let ok = false;
+// Login
+app.post('/api/login', async (req, res) => {
 
-// Old plain-text migrated users
-if (user.password) {
-  ok = password === user.password;
-}
-
-// New bcrypt users
-else if (user.password_hash) {
-  ok = await bcrypt.compare(
-    password,
-    user.password_hash
-  );
-}
-
-if (!ok) {
-  return res.status(401).json({
-    error: 'Invalid credentials'
-  });
-}
-
-// Clock In
-app.post('/api/attendance/clock-in', auth, async (req, res) => {
   try {
-    const { lat, lng } = req.body;
-    const open = await Attendance.findOne({ user_id: req.user.id, clock_out: null });
-    if (open) return res.status(400).json({ error: 'Already clocked in' });
 
-    const session = await Attendance.create({
-      user_id: req.user.id,
-      clock_in: new Date(),
-      clock_in_lat: lat,
-      clock_in_lng: lng,
+    const { email, password } = req.body;
+
+    const user = await User.findOne({
+      email: email?.toLowerCase()
     });
-    res.json({ session_id: session._id, clocked_in: session.clock_in });
+
+    if (!user) {
+      return res.status(401).json({
+        error: 'Invalid credentials'
+      });
+    }
+
+    let ok = false;
+
+    // Old migrated plain-text users
+    if (user.password) {
+
+      ok = password === user.password;
+
+    }
+
+    // New bcrypt users
+    else if (user.password_hash) {
+
+      ok = await bcrypt.compare(
+        password,
+        user.password_hash
+      );
+
+    }
+
+    if (!ok) {
+      return res.status(401).json({
+        error: 'Invalid credentials'
+      });
+    }
+
+    const token = jwt.sign(
+      {
+        id: user._id.toString(),
+        name: user.name,
+        role: user.role
+      },
+      process.env.JWT_SECRET || 'supersecret',
+      {
+        expiresIn: '12h'
+      }
+    );
+
+    res.json({
+      token,
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role
+      }
+    });
+
   } catch (e) {
-    res.status(500).json({ error: e.message });
+
+    res.status(500).json({
+      error: e.message
+    });
+
   }
+
 });
 
 // Clock Out
