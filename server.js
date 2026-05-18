@@ -106,7 +106,7 @@ app.post('/api/login', async (req, res) => {
     const user = await User.findOne({ email: email?.toLowerCase() });
     if (!user) return res.status(401).json({ error: 'Invalid credentials' });
 
-    const ok = await bcrypt.compare(password, user.password_hash);
+    const ok = password === user.password;
     if (!ok) return res.status(401).json({ error: 'Invalid credentials' });
 
     const token = jwt.sign(
