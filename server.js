@@ -175,6 +175,58 @@ app.post('/api/login', async (req, res) => {
 });
 
 
+// Clock In
+app.post('/api/attendance/clock-in', auth, async (req, res) => {
+
+  try {
+
+    const { lat, lng } = req.body;
+
+    // Check existing active session
+    const existing = await Attendance.findOne({
+      user_id: req.user.id,
+      clock_out: null
+    });
+
+    if (existing) {
+
+      return res.json({
+        session: existing,
+        alreadyClockedIn: true
+      });
+
+    }
+
+    // Create attendance session
+    const session = await Attendance.create({
+
+      user_id: req.user.id,
+
+      clock_in: new Date(),
+
+      clock_in_lat: lat,
+
+      clock_in_lng: lng
+
+    });
+
+    res.json({
+      session
+    });
+
+  } catch (e) {
+
+    console.log(e);
+
+    res.status(500).json({
+      error: e.message
+    });
+
+  }
+
+});
+
+
 // Clock Out
 app.post('/api/attendance/clock-out', auth, async (req, res) => {
   try {
