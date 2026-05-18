@@ -353,15 +353,38 @@ app.get('/api/admin/users', auth, admin, async (req, res) => {
 });
 
 // Location trail for a session
-app.get('/api/admin/location-trail/:session_id', auth, admin, async (req, res) => {
-  try {
-    const trail = await Location.find({ session_id: req.params.session_id })
-      .sort({ recorded_at: 1 }).lean();
-    res.json(trail);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+app.get(
+  '/api/admin/location-trail/:sessionId',
+  auth,
+  async (req, res) => {
+
+    try {
+
+      const mongoose = require('mongoose');
+
+      const trail = await Location.find({
+
+        session_id: new mongoose.Types.ObjectId(
+          req.params.sessionId
+        )
+
+      })
+      .sort({ createdAt: 1 });
+
+      res.json(trail);
+
+    } catch (e) {
+
+      console.log(e);
+
+      res.status(500).json({
+        error: e.message
+      });
+
+    }
+
   }
-});
+);
 
 // ── Start ──────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 5000;
