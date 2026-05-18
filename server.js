@@ -10,7 +10,7 @@ app.use(express.json());
 app.use(cors());
 
 // ─── MongoDB Connection ────────────────────────────────────────────────────
-mongoose.connect(process.env.MONGO_URI, { dbName: 'attendance_db' })
+mongoose.connect(process.env.MONGO_URI, { dbName: 'login_user' })
   .then(() => console.log('✅ MongoDB connected'))
   .catch(err => { console.error('❌ MongoDB error:', err.message); process.exit(1); });
 
