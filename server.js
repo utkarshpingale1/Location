@@ -44,9 +44,6 @@ const locationSchema = new mongoose.Schema({
   recorded_at: { type: Date, default: Date.now },
 });
 
-// ─── NEW: RouteGeoJSON Schema ──────────────────────────────────────────────
-// Stores the fully-built GeoJSON FeatureCollection for every completed shift.
-// Unique on session_id so upserts never create duplicates.
 const routeGeoJSONSchema = new mongoose.Schema({
   user_id:    { type: mongoose.Schema.Types.ObjectId, ref: 'User',       required: true },
   session_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Attendance', required: true },
@@ -63,13 +60,13 @@ const routeGeoJSONSchema = new mongoose.Schema({
 
 attendanceSchema.index({ user_id: 1, clock_in: -1 });
 locationSchema.index({ user_id: 1, recorded_at: -1 });
-routeGeoJSONSchema.index({ session_id: 1 }, { unique: true }); // prevent duplicates
-routeGeoJSONSchema.index({ user_id: 1, saved_at: -1 });        // fast per-user queries
+routeGeoJSONSchema.index({ session_id: 1 }, { unique: true });
+routeGeoJSONSchema.index({ user_id: 1, saved_at: -1 });
 
 const User         = mongoose.model('User',         userSchema);
 const Attendance   = mongoose.model('Attendance',   attendanceSchema);
 const Location     = mongoose.model('Location',     locationSchema);
-const RouteGeoJSON = mongoose.model('RouteGeoJSON', routeGeoJSONSchema); // ← NEW
+const RouteGeoJSON = mongoose.model('RouteGeoJSON', routeGeoJSONSchema);
 
 // ─── Seed default admin (once on startup) ─────────────────────────────────
 async function seedAdmin() {
@@ -99,29 +96,23 @@ function admin(req, res, next) {
   next();
 }
 
-// ─── NEW: buildAndSaveGeoJSON helper ──────────────────────────────────────
-// Builds a FeatureCollection from a session's location pings and upserts it
-// into the RouteGeoJSON collection. Returns the geojson object or null if
-// there are fewer than 2 coordinates (not enough to form a route).
+// ─── buildAndSaveGeoJSON helper ────────────────────────────────────────────
 async function buildAndSaveGeoJSON(session, user) {
   const pings = await Location.find({ session_id: session._id })
     .sort({ recorded_at: 1 }).lean();
 
-  // Build coordinate array: clock-in → pings → clock-out
-  // GeoJSON requires [longitude, latitude] order
   const coords = [];
-  if (session.clock_in_lat  && session.clock_in_lng)
+  if (session.clock_in_lat  != null && session.clock_in_lng  != null)
     coords.push([session.clock_in_lng,  session.clock_in_lat]);
   pings.forEach(p => coords.push([p.lng, p.lat]));
-  if (session.clock_out_lat && session.clock_out_lng)
+  if (session.clock_out_lat != null && session.clock_out_lng != null)
     coords.push([session.clock_out_lng, session.clock_out_lat]);
 
-  if (coords.length < 2) return null; // not enough data
+  if (coords.length < 2) return null;
 
   const geojson = {
     type: "FeatureCollection",
     features: [
-      // Full route as a LineString
       {
         type: "Feature",
         geometry: { type: "LineString", coordinates: coords },
@@ -135,13 +126,11 @@ async function buildAndSaveGeoJSON(session, user) {
           point_count:    coords.length,
         },
       },
-      // Clock-in marker
       {
         type: "Feature",
         geometry: { type: "Point", coordinates: coords[0] },
-        properties: { label: "Clock In",  time: session.clock_in,          marker: "green" },
+        properties: { label: "Clock In",  time: session.clock_in, marker: "green" },
       },
-      // Clock-out marker
       {
         type: "Feature",
         geometry: { type: "Point", coordinates: coords[coords.length - 1] },
@@ -150,7 +139,6 @@ async function buildAndSaveGeoJSON(session, user) {
     ],
   };
 
-  // Upsert — re-saving a session updates the stored document, never duplicates
   await RouteGeoJSON.findOneAndUpdate(
     { session_id: session._id },
     {
@@ -175,17 +163,29 @@ async function buildAndSaveGeoJSON(session, user) {
 // ─── Routes ─────────────────────────────────────────────────────────────────
 
 // Register
+// ✅ FIX: Added role guard — prevents anyone from self-registering as admin
 app.post('/api/register', async (req, res) => {
   try {
-    const { name, email, password, role = 'employee' } = req.body;
+    const { name, email, password } = req.body;
+
+    // ✅ FIX: Validate all required fields
     if (!name || !email || !password)
       return res.status(400).json({ error: 'Missing fields' });
+
+    // ✅ FIX: Basic email format check
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
+      return res.status(400).json({ error: 'Invalid email format' });
+
+    // ✅ FIX: Minimum password length
+    if (password.length < 6)
+      return res.status(400).json({ error: 'Password must be at least 6 characters' });
 
     const exists = await User.findOne({ email: email.toLowerCase() });
     if (exists) return res.status(400).json({ error: 'Email already registered' });
 
     const hash = await bcrypt.hash(password, 10);
-    const user = await User.create({ name, email, password_hash: hash, role });
+    // ✅ FIX: role is always forced to 'employee' — admin cannot be set via API
+    const user = await User.create({ name, email, password_hash: hash, role: 'employee' });
     res.json({ id: user._id, name: user.name, email: user.email, role: user.role });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -193,10 +193,16 @@ app.post('/api/register', async (req, res) => {
 });
 
 // Login
+// ✅ FIX: Added missing field validation before DB query
 app.post('/api/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-    const user = await User.findOne({ email: email?.toLowerCase() });
+
+    // ✅ FIX: Guard against missing fields (prevents crashes & unhelpful errors)
+    if (!email || !password)
+      return res.status(400).json({ error: 'Email and password are required' });
+
+    const user = await User.findOne({ email: email.toLowerCase() });
     if (!user) return res.status(401).json({ error: 'Invalid credentials' });
 
     const ok = await bcrypt.compare(password, user.password_hash);
@@ -214,9 +220,15 @@ app.post('/api/login', async (req, res) => {
 });
 
 // Clock In
+// ✅ FIX: Validate lat/lng are real numbers before saving
 app.post('/api/attendance/clock-in', auth, async (req, res) => {
   try {
     const { lat, lng } = req.body;
+
+    // ✅ FIX: Reject invalid coordinates
+    if (lat == null || lng == null || isNaN(lat) || isNaN(lng))
+      return res.status(400).json({ error: 'Valid lat and lng are required' });
+
     const open = await Attendance.findOne({ user_id: req.user.id, clock_out: null });
     if (open) return res.status(400).json({ error: 'Already clocked in' });
 
@@ -232,7 +244,7 @@ app.post('/api/attendance/clock-in', auth, async (req, res) => {
   }
 });
 
-// Clock Out — auto-saves GeoJSON to DB after saving the session
+// Clock Out
 app.post('/api/attendance/clock-out', auth, async (req, res) => {
   try {
     const { lat, lng } = req.body;
@@ -241,12 +253,13 @@ app.post('/api/attendance/clock-out', auth, async (req, res) => {
 
     const now = new Date();
     session.clock_out     = now;
-    session.clock_out_lat = lat;
-    session.clock_out_lng = lng;
+    // ✅ FIX: Only save coords if they are valid numbers (0,0 is a real coordinate
+    //         but the Flutter app sends 0,0 as fallback — store null instead)
+    session.clock_out_lat = (lat != null && !isNaN(lat) && lat !== 0) ? lat : null;
+    session.clock_out_lng = (lng != null && !isNaN(lng) && lng !== 0) ? lng : null;
     session.total_minutes = Math.round((now - session.clock_in) / 60000);
     await session.save();
 
-    // ─── NEW: auto-save route GeoJSON to DB (non-blocking — won't fail the response) ───
     const user = await User.findById(req.user.id).lean();
     buildAndSaveGeoJSON(session.toObject(), user).catch(err =>
       console.error('⚠️  GeoJSON auto-save failed:', err.message)
@@ -259,9 +272,15 @@ app.post('/api/attendance/clock-out', auth, async (req, res) => {
 });
 
 // Save GPS ping
+// ✅ FIX: Validate lat/lng before saving junk coordinates to DB
 app.post('/api/location', auth, async (req, res) => {
   try {
     const { lat, lng, accuracy } = req.body;
+
+    // ✅ FIX: Reject missing or non-numeric coordinates
+    if (lat == null || lng == null || isNaN(lat) || isNaN(lng))
+      return res.status(400).json({ error: 'Valid lat and lng are required' });
+
     const session = await Attendance.findOne({ user_id: req.user.id, clock_out: null });
     await Location.create({
       user_id:    req.user.id,
@@ -286,9 +305,7 @@ app.get('/api/attendance/me', auth, async (req, res) => {
   }
 });
 
-// ─── NEW: Employee — fetch own saved GeoJSON routes ────────────────────────
-// GET /api/routes/me
-// Returns the last 30 stored route documents for the logged-in employee.
+// Employee — fetch own saved GeoJSON routes
 app.get('/api/routes/me', auth, async (req, res) => {
   try {
     const routes = await RouteGeoJSON.find({ user_id: req.user.id })
@@ -346,8 +363,11 @@ app.get('/api/admin/attendance', auth, admin, async (req, res) => {
     const filter = {};
     if (user_id) filter.user_id = user_id;
     if (date) {
+      // ✅ FIX: Validate date format to prevent invalid Date objects hitting the DB
       const start = new Date(date);
-      const end   = new Date(date); end.setDate(end.getDate() + 1);
+      if (isNaN(start.getTime()))
+        return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD' });
+      const end = new Date(date); end.setDate(end.getDate() + 1);
       filter.clock_in = { $gte: start, $lt: end };
     }
 
@@ -377,8 +397,12 @@ app.get('/api/admin/users', auth, admin, async (req, res) => {
 });
 
 // Location trail for a session
+// ✅ FIX: Validate session_id is a valid ObjectId before querying
 app.get('/api/admin/location-trail/:session_id', auth, admin, async (req, res) => {
   try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.session_id))
+      return res.status(400).json({ error: 'Invalid session ID' });
+
     const trail = await Location.find({ session_id: req.params.session_id })
       .sort({ recorded_at: 1 }).lean();
     res.json(trail);
@@ -387,17 +411,18 @@ app.get('/api/admin/location-trail/:session_id', auth, admin, async (req, res) =
   }
 });
 
-// ─── NEW: Admin — query all stored GeoJSON routes ─────────────────────────
-// GET /api/admin/routes?date=YYYY-MM-DD&user_id=...
-// Optional filters: date (matches clock_in date) and/or user_id.
+// Admin — query all stored GeoJSON routes
 app.get('/api/admin/routes', auth, admin, async (req, res) => {
   try {
     const { date, user_id } = req.query;
     const filter = {};
     if (user_id) filter.user_id = user_id;
     if (date) {
+      // ✅ FIX: Validate date format
       const start = new Date(date);
-      const end   = new Date(date); end.setDate(end.getDate() + 1);
+      if (isNaN(start.getTime()))
+        return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD' });
+      const end = new Date(date); end.setDate(end.getDate() + 1);
       filter['metadata.clock_in'] = { $gte: start, $lt: end };
     }
     const routes = await RouteGeoJSON.find(filter)
@@ -408,11 +433,13 @@ app.get('/api/admin/routes', auth, admin, async (req, res) => {
   }
 });
 
-// ─── NEW: Admin — manually trigger GeoJSON save for any session ───────────
-// POST /api/admin/routes/save/:sessionId
-// Useful for backfilling old sessions that were created before this feature.
+// Admin — manually trigger GeoJSON save for any session
+// ✅ FIX: Validate ObjectId before hitting DB
 app.post('/api/admin/routes/save/:sessionId', auth, admin, async (req, res) => {
   try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.sessionId))
+      return res.status(400).json({ error: 'Invalid session ID' });
+
     const session = await Attendance.findById(req.params.sessionId).lean();
     if (!session) return res.status(404).json({ error: 'Session not found' });
 
@@ -428,11 +455,13 @@ app.post('/api/admin/routes/save/:sessionId', auth, admin, async (req, res) => {
   }
 });
 
-// ── GeoJSON Route Export (existing — now also triggers a DB save) ─────────
-
 // Single shift route: GET /api/attendance/:id/geojson
+// ✅ FIX: Validate ObjectId before DB query
 app.get('/api/attendance/:id/geojson', auth, async (req, res) => {
   try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id))
+      return res.status(400).json({ error: 'Invalid shift ID' });
+
     const session = await Attendance.findById(req.params.id).lean();
     if (!session) return res.status(404).json({ error: 'Shift not found' });
 
@@ -440,7 +469,6 @@ app.get('/api/attendance/:id/geojson', auth, async (req, res) => {
       return res.status(403).json({ error: 'Forbidden' });
 
     const user    = await User.findById(session.user_id).lean();
-    // ─── UPDATED: reuse helper so the file download also persists to DB ───
     const geojson = await buildAndSaveGeoJSON(session, user);
 
     if (!geojson)
@@ -458,7 +486,6 @@ app.get('/api/attendance/:id/geojson', auth, async (req, res) => {
 });
 
 // Admin: All shifts for an employee on a given date
-// GET /api/admin/employee/:empId/geojson?date=2025-06-01
 app.get('/api/admin/employee/:empId/geojson', auth, admin, async (req, res) => {
   try {
     const { empId } = req.params;
@@ -466,8 +493,15 @@ app.get('/api/admin/employee/:empId/geojson', auth, admin, async (req, res) => {
 
     if (!date) return res.status(400).json({ error: 'date query param required (YYYY-MM-DD)' });
 
+    // ✅ FIX: Validate empId and date
+    if (!mongoose.Types.ObjectId.isValid(empId))
+      return res.status(400).json({ error: 'Invalid employee ID' });
+
     const start = new Date(date);
-    const end   = new Date(date); end.setDate(end.getDate() + 1);
+    if (isNaN(start.getTime()))
+      return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD' });
+
+    const end = new Date(date); end.setDate(end.getDate() + 1);
 
     const shifts = await Attendance.find({
       user_id:  empId,
@@ -482,9 +516,9 @@ app.get('/api/admin/employee/:empId/geojson', auth, admin, async (req, res) => {
         .sort({ recorded_at: 1 }).lean();
 
       const coords = [];
-      if (s.clock_in_lat  && s.clock_in_lng)  coords.push([s.clock_in_lng,  s.clock_in_lat]);
+      if (s.clock_in_lat  != null && s.clock_in_lng  != null) coords.push([s.clock_in_lng,  s.clock_in_lat]);
       pings.forEach(p => coords.push([p.lng, p.lat]));
-      if (s.clock_out_lat && s.clock_out_lng) coords.push([s.clock_out_lng, s.clock_out_lat]);
+      if (s.clock_out_lat != null && s.clock_out_lng != null) coords.push([s.clock_out_lng, s.clock_out_lat]);
 
       if (coords.length >= 2) {
         features.push({
