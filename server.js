@@ -44,12 +44,32 @@ const locationSchema = new mongoose.Schema({
   recorded_at: { type: Date, default: Date.now },
 });
 
+// ─── NEW: RouteGeoJSON Schema ──────────────────────────────────────────────
+// Stores the fully-built GeoJSON FeatureCollection for every completed shift.
+// Unique on session_id so upserts never create duplicates.
+const routeGeoJSONSchema = new mongoose.Schema({
+  user_id:    { type: mongoose.Schema.Types.ObjectId, ref: 'User',       required: true },
+  session_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Attendance', required: true },
+  geojson:    { type: mongoose.Schema.Types.Mixed,    required: true },
+  metadata: {
+    ping_count:    { type: Number, default: 0 },
+    point_count:   { type: Number, default: 0 },
+    total_minutes: { type: Number, default: null },
+    clock_in:      { type: Date,   default: null },
+    clock_out:     { type: Date,   default: null },
+  },
+  saved_at: { type: Date, default: Date.now },
+});
+
 attendanceSchema.index({ user_id: 1, clock_in: -1 });
 locationSchema.index({ user_id: 1, recorded_at: -1 });
+routeGeoJSONSchema.index({ session_id: 1 }, { unique: true }); // prevent duplicates
+routeGeoJSONSchema.index({ user_id: 1, saved_at: -1 });        // fast per-user queries
 
-const User       = mongoose.model('User',       userSchema);
-const Attendance = mongoose.model('Attendance', attendanceSchema);
-const Location   = mongoose.model('Location',   locationSchema);
+const User         = mongoose.model('User',         userSchema);
+const Attendance   = mongoose.model('Attendance',   attendanceSchema);
+const Location     = mongoose.model('Location',     locationSchema);
+const RouteGeoJSON = mongoose.model('RouteGeoJSON', routeGeoJSONSchema); // ← NEW
 
 // ─── Seed default admin (once on startup) ─────────────────────────────────
 async function seedAdmin() {
@@ -77,6 +97,79 @@ function auth(req, res, next) {
 function admin(req, res, next) {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
   next();
+}
+
+// ─── NEW: buildAndSaveGeoJSON helper ──────────────────────────────────────
+// Builds a FeatureCollection from a session's location pings and upserts it
+// into the RouteGeoJSON collection. Returns the geojson object or null if
+// there are fewer than 2 coordinates (not enough to form a route).
+async function buildAndSaveGeoJSON(session, user) {
+  const pings = await Location.find({ session_id: session._id })
+    .sort({ recorded_at: 1 }).lean();
+
+  // Build coordinate array: clock-in → pings → clock-out
+  // GeoJSON requires [longitude, latitude] order
+  const coords = [];
+  if (session.clock_in_lat  && session.clock_in_lng)
+    coords.push([session.clock_in_lng,  session.clock_in_lat]);
+  pings.forEach(p => coords.push([p.lng, p.lat]));
+  if (session.clock_out_lat && session.clock_out_lng)
+    coords.push([session.clock_out_lng, session.clock_out_lat]);
+
+  if (coords.length < 2) return null; // not enough data
+
+  const geojson = {
+    type: "FeatureCollection",
+    features: [
+      // Full route as a LineString
+      {
+        type: "Feature",
+        geometry: { type: "LineString", coordinates: coords },
+        properties: {
+          employee_name:  user?.name  ?? null,
+          employee_email: user?.email ?? null,
+          clock_in:       session.clock_in,
+          clock_out:      session.clock_out  ?? null,
+          total_minutes:  session.total_minutes ?? null,
+          ping_count:     pings.length,
+          point_count:    coords.length,
+        },
+      },
+      // Clock-in marker
+      {
+        type: "Feature",
+        geometry: { type: "Point", coordinates: coords[0] },
+        properties: { label: "Clock In",  time: session.clock_in,          marker: "green" },
+      },
+      // Clock-out marker
+      {
+        type: "Feature",
+        geometry: { type: "Point", coordinates: coords[coords.length - 1] },
+        properties: { label: "Clock Out", time: session.clock_out ?? "Active", marker: "red" },
+      },
+    ],
+  };
+
+  // Upsert — re-saving a session updates the stored document, never duplicates
+  await RouteGeoJSON.findOneAndUpdate(
+    { session_id: session._id },
+    {
+      user_id:    session.user_id,
+      session_id: session._id,
+      geojson,
+      metadata: {
+        ping_count:    pings.length,
+        point_count:   coords.length,
+        total_minutes: session.total_minutes ?? null,
+        clock_in:      session.clock_in,
+        clock_out:     session.clock_out ?? null,
+      },
+      saved_at: new Date(),
+    },
+    { upsert: true, new: true }
+  );
+
+  return geojson;
 }
 
 // ─── Routes ─────────────────────────────────────────────────────────────────
@@ -139,7 +232,7 @@ app.post('/api/attendance/clock-in', auth, async (req, res) => {
   }
 });
 
-// Clock Out
+// Clock Out — auto-saves GeoJSON to DB after saving the session
 app.post('/api/attendance/clock-out', auth, async (req, res) => {
   try {
     const { lat, lng } = req.body;
@@ -152,6 +245,12 @@ app.post('/api/attendance/clock-out', auth, async (req, res) => {
     session.clock_out_lng = lng;
     session.total_minutes = Math.round((now - session.clock_in) / 60000);
     await session.save();
+
+    // ─── NEW: auto-save route GeoJSON to DB (non-blocking — won't fail the response) ───
+    const user = await User.findById(req.user.id).lean();
+    buildAndSaveGeoJSON(session.toObject(), user).catch(err =>
+      console.error('⚠️  GeoJSON auto-save failed:', err.message)
+    );
 
     res.json({ session });
   } catch (e) {
@@ -182,6 +281,19 @@ app.get('/api/attendance/me', auth, async (req, res) => {
       .sort({ clock_in: -1 }).limit(30).lean();
     const user = await User.findById(req.user.id).lean();
     res.json(rows.map(r => ({ ...r, name: user?.name })));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── NEW: Employee — fetch own saved GeoJSON routes ────────────────────────
+// GET /api/routes/me
+// Returns the last 30 stored route documents for the logged-in employee.
+app.get('/api/routes/me', auth, async (req, res) => {
+  try {
+    const routes = await RouteGeoJSON.find({ user_id: req.user.id })
+      .sort({ saved_at: -1 }).limit(30).lean();
+    res.json(routes);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -275,79 +387,64 @@ app.get('/api/admin/location-trail/:session_id', auth, admin, async (req, res) =
   }
 });
 
-// ── GeoJSON Route Export ──────────────────────────────────────────────────────
+// ─── NEW: Admin — query all stored GeoJSON routes ─────────────────────────
+// GET /api/admin/routes?date=YYYY-MM-DD&user_id=...
+// Optional filters: date (matches clock_in date) and/or user_id.
+app.get('/api/admin/routes', auth, admin, async (req, res) => {
+  try {
+    const { date, user_id } = req.query;
+    const filter = {};
+    if (user_id) filter.user_id = user_id;
+    if (date) {
+      const start = new Date(date);
+      const end   = new Date(date); end.setDate(end.getDate() + 1);
+      filter['metadata.clock_in'] = { $gte: start, $lt: end };
+    }
+    const routes = await RouteGeoJSON.find(filter)
+      .sort({ saved_at: -1 }).limit(100).lean();
+    res.json(routes);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── NEW: Admin — manually trigger GeoJSON save for any session ───────────
+// POST /api/admin/routes/save/:sessionId
+// Useful for backfilling old sessions that were created before this feature.
+app.post('/api/admin/routes/save/:sessionId', auth, admin, async (req, res) => {
+  try {
+    const session = await Attendance.findById(req.params.sessionId).lean();
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+
+    const user    = await User.findById(session.user_id).lean();
+    const geojson = await buildAndSaveGeoJSON(session, user);
+
+    if (!geojson)
+      return res.status(400).json({ error: 'Not enough location data to build a route (need ≥ 2 coordinates)' });
+
+    res.json({ saved: true, session_id: session._id });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── GeoJSON Route Export (existing — now also triggers a DB save) ─────────
 
 // Single shift route: GET /api/attendance/:id/geojson
-// Returns a downloadable .geojson file with the full route (clock-in → pings → clock-out)
 app.get('/api/attendance/:id/geojson', auth, async (req, res) => {
   try {
     const session = await Attendance.findById(req.params.id).lean();
     if (!session) return res.status(404).json({ error: 'Shift not found' });
 
-    // Only allow employee to download their own, or admin to download any
-    if (req.user.role !== 'admin' && session.user_id.toString() !== req.user.id) {
+    if (req.user.role !== 'admin' && session.user_id.toString() !== req.user.id)
       return res.status(403).json({ error: 'Forbidden' });
-    }
 
-    // Get all GPS pings for this session in chronological order
-    const pings = await Location.find({ session_id: session._id })
-      .sort({ recorded_at: 1 }).lean();
+    const user    = await User.findById(session.user_id).lean();
+    // ─── UPDATED: reuse helper so the file download also persists to DB ───
+    const geojson = await buildAndSaveGeoJSON(session, user);
 
-    // GeoJSON requires [longitude, latitude] order (NOT lat, lng)
-    const coords = [];
-
-    if (session.clock_in_lat && session.clock_in_lng)
-      coords.push([session.clock_in_lng, session.clock_in_lat]);
-
-    pings.forEach(p => coords.push([p.lng, p.lat]));
-
-    if (session.clock_out_lat && session.clock_out_lng)
-      coords.push([session.clock_out_lng, session.clock_out_lat]);
-
-    if (coords.length < 2)
+    if (!geojson)
       return res.status(400).json({ error: 'Not enough location data to build a route' });
-
-    const user = await User.findById(session.user_id).lean();
-
-    const geojson = {
-      type: "FeatureCollection",
-      features: [
-        // Full route as a LineString
-        {
-          type: "Feature",
-          geometry: { type: "LineString", coordinates: coords },
-          properties: {
-            employee_name:  user?.name  ?? null,
-            employee_email: user?.email ?? null,
-            clock_in:       session.clock_in,
-            clock_out:      session.clock_out  ?? null,
-            total_minutes:  session.total_minutes ?? null,
-            ping_count:     pings.length,
-            point_count:    coords.length,
-          },
-        },
-        // Clock-in marker (green)
-        {
-          type: "Feature",
-          geometry: { type: "Point", coordinates: coords[0] },
-          properties: {
-            label:  "Clock In",
-            time:   session.clock_in,
-            marker: "green",
-          },
-        },
-        // Clock-out marker (red)
-        {
-          type: "Feature",
-          geometry: { type: "Point", coordinates: coords[coords.length - 1] },
-          properties: {
-            label:  "Clock Out",
-            time:   session.clock_out ?? "Active",
-            marker: "red",
-          },
-        },
-      ],
-    };
 
     res.setHeader('Content-Type', 'application/geo+json');
     res.setHeader(
@@ -355,7 +452,6 @@ app.get('/api/attendance/:id/geojson', auth, async (req, res) => {
       `attachment; filename="shift_${session._id}_route.geojson"`
     );
     res.json(geojson);
-
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -402,13 +498,11 @@ app.get('/api/admin/employee/:empId/geojson', auth, admin, async (req, res) => {
             ping_count:    pings.length,
           },
         });
-        // Start marker
         features.push({
           type: "Feature",
           geometry: { type: "Point", coordinates: coords[0] },
-          properties: { label: "Clock In", time: s.clock_in, marker: "green" },
+          properties: { label: "Clock In",  time: s.clock_in,              marker: "green" },
         });
-        // End marker
         features.push({
           type: "Feature",
           geometry: { type: "Point", coordinates: coords[coords.length - 1] },
@@ -426,7 +520,6 @@ app.get('/api/admin/employee/:empId/geojson', auth, admin, async (req, res) => {
       `attachment; filename="${user?.name ?? empId}_${date}_routes.geojson"`
     );
     res.json({ type: "FeatureCollection", features });
-
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
