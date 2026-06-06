@@ -102,6 +102,13 @@ async function buildAndSaveGeoJSON(session, user) {
 
   if (coords.length < 2) return null;
 
+  // Always re-fetch user from DB to guarantee fresh name + email
+  let freshUser = user;
+  if (session.user_id) {
+    const fetched = await User.findById(session.user_id).lean();
+    if (fetched) freshUser = fetched;
+  }
+
   const geojson = {
     type: "FeatureCollection",
     features: [
@@ -109,8 +116,8 @@ async function buildAndSaveGeoJSON(session, user) {
         type: "Feature",
         geometry: { type: "LineString", coordinates: coords },
         properties: {
-          employee_name:  user?.name  ?? null,
-          employee_email: user?.email ?? null,
+          employee_name:  freshUser?.name  ?? null,
+          employee_email: freshUser?.email ?? null,
           clock_in:       session.clock_in,
           clock_out:      session.clock_out  ?? null,
           total_minutes:  session.total_minutes ?? null,
@@ -634,3 +641,81 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok', time: new Date() }
 // ─── Start ─────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server running on port ${PORT}`));
+
+// ══════════════════════════════════════════════════════════════════════════
+//  DEBUG ROUTES — shows raw attendance doc exactly as stored in MongoDB
+// ══════════════════════════════════════════════════════════════════════════
+
+// View raw attendance document with full location_trail embedded array
+// GET /api/debug/session/:id
+app.get('/api/debug/session/:id', auth, async (req, res) => {
+  try {
+    const session = await Attendance.findById(req.params.id).lean();
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+    if (req.user.role !== 'admin' && session.user_id.toString() !== req.user.id)
+      return res.status(403).json({ error: 'Forbidden' });
+    const user = await User.findById(session.user_id, '-password_hash').lean();
+    res.json({
+      session_id:     session._id,
+      user_name:      user?.name  ?? null,
+      user_email:     user?.email ?? null,
+      clock_in:       session.clock_in,
+      clock_out:      session.clock_out,
+      total_minutes:  session.total_minutes,
+      ping_count:     session.location_trail?.length ?? 0,
+      // ── Every ping stored as an entry in this array ───────────────
+      // { lat: 19.07, lng: 72.87, recorded_at: "..." }
+      // { lat: 19.08, lng: 72.88, recorded_at: "..." }  ← 15s later
+      // { lat: 19.09, lng: 72.89, recorded_at: "..." }  ← 30s later
+      location_trail: session.location_trail ?? [],
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// View active session raw document — call while clocked in to see trail growing
+// GET /api/debug/active-session
+app.get('/api/debug/active-session', auth, async (req, res) => {
+  try {
+    const session = await Attendance.findOne({ user_id: req.user.id, clock_out: null }).lean();
+    if (!session) return res.status(404).json({ error: 'No active session — not clocked in' });
+    const user = await User.findById(req.user.id, '-password_hash').lean();
+    res.json({
+      session_id:     session._id,
+      user_name:      user?.name  ?? null,
+      user_email:     user?.email ?? null,
+      clock_in:       session.clock_in,
+      clock_out:      null,
+      ping_count:     session.location_trail?.length ?? 0,
+      location_trail: session.location_trail ?? [],
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Admin: all sessions for a user with full embedded trails
+// GET /api/debug/user/:user_id/sessions
+app.get('/api/debug/user/:user_id/sessions', auth, admin, async (req, res) => {
+  try {
+    const sessions = await Attendance.find({ user_id: req.params.user_id })
+      .sort({ clock_in: -1 }).limit(10).lean();
+    const user = await User.findById(req.params.user_id, '-password_hash').lean();
+    res.json({
+      user_name:      user?.name  ?? null,
+      user_email:     user?.email ?? null,
+      total_sessions: sessions.length,
+      sessions: sessions.map(s => ({
+        session_id:     s._id,
+        clock_in:       s.clock_in,
+        clock_out:      s.clock_out,
+        total_minutes:  s.total_minutes,
+        ping_count:     s.location_trail?.length ?? 0,
+        location_trail: s.location_trail ?? [],
+      })),
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
