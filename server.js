@@ -254,7 +254,7 @@ app.post('/api/attendance/clock-out', auth, async (req, res) => {
     session.total_minutes = Math.round((now - session.clock_in) / 60000);
     await session.save();
 
-    // ── STEP 1: Add final clock-out ping ──────────────────────────────────
+    // STEP 1: Save final clock-out ping
     if (lat && lng) {
       await Location.create({
         user_id:     req.user.id,
@@ -265,21 +265,30 @@ app.post('/api/attendance/clock-out', auth, async (req, res) => {
       });
     }
 
-    // ── STEP 2: Build + save GeoJSON BEFORE deleting pings ───────────────
+    // STEP 2: Count pings BEFORE building — log so you can debug
+    const pingCount = await Location.countDocuments({ session_id: session._id });
+    console.log(`📍 Pings found for session ${session._id}: ${pingCount}`);
+
+    // STEP 3: Build and save GeoJSON — WAIT for it fully
     const user = await User.findById(req.user.id).lean();
-    await buildAndSaveGeoJSON(session.toObject(), user).catch(err =>
-      console.error('⚠️ GeoJSON save failed:', err.message)
-    );
+    let routeSaved = false;
+    try {
+      const geojson = await buildAndSaveGeoJSON(session.toObject(), user);
+      routeSaved = geojson !== null;
+      console.log(`✅ Route saved: ${routeSaved}, coords: ${geojson?.features?.[0]?.geometry?.coordinates?.length ?? 0}`);
+    } catch (err) {
+      console.error('❌ GeoJSON save error:', err.message);
+    }
 
-    // ── STEP 3: Delete pings only AFTER route is saved ───────────────────
-    await Location.deleteMany({ user_id: req.user.id });
+    // STEP 4: Only delete pings after route is confirmed saved
+    await Location.deleteMany({ session_id: session._id }); // ← delete by session, not user
+    console.log(`🗑️ Pings deleted for session ${session._id}`);
 
-    res.json({ session });
+    res.json({ session, route_saved: routeSaved });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
- 
 // ── Save GPS ping ─────────────────────────────────────────────────────────────
 app.post('/api/location', auth, async (req, res) => {
   try {
@@ -318,9 +327,7 @@ app.post('/api/location', auth, async (req, res) => {
 
     if (!lat || !lng) return res.status(400).json({ error: 'lat and lng required' });
 
-    // Use session_id sent by app — avoids extra DB query every 15 seconds
     let resolvedSessionId = session_id || null;
-    // Fallback: look up open session if app didn't send one
     if (!resolvedSessionId) {
       const session = await Attendance.findOne({ user_id: req.user.id, clock_out: null });
       resolvedSessionId = session?._id || null;
@@ -329,11 +336,13 @@ app.post('/api/location', auth, async (req, res) => {
     await Location.create({
       user_id:     req.user.id,
       session_id:  resolvedSessionId,
-      lat,
-      lng,
+      lat, lng,
       accuracy:    accuracy ?? null,
       recorded_at: new Date(),
     });
+
+    // ← Add this so you can see pings arriving in server logs
+    console.log(`📌 Ping saved — user: ${req.user.id}, session: ${resolvedSessionId}, lat: ${lat}, lng: ${lng}`);
 
     res.json({ saved: true });
   } catch (e) {
