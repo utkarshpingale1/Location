@@ -46,7 +46,22 @@ const locationSchema = new mongoose.Schema({
   heading:     { type: Number, default: null },     // degrees 0-360
   recorded_at: { type: Date, default: Date.now },
 });
+const routeGeoJSONSchema = new mongoose.Schema({
+  user_id:    { type: mongoose.Schema.Types.ObjectId, ref: 'User',       required: true },
+  session_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Attendance', required: true },
+  geojson:    { type: mongoose.Schema.Types.Mixed,    required: true },
+  metadata: {
+    ping_count:    Number,
+    point_count:   Number,
+    total_minutes: Number,
+    clock_in:      Date,
+    clock_out:     Date,
+  },
+  saved_at: { type: Date, default: Date.now },
+});
+routeGeoJSONSchema.index({ session_id: 1 }, { unique: true });
 
+const RouteGeoJSON = mongoose.model('RouteGeoJSON', routeGeoJSONSchema);
 attendanceSchema.index({ user_id: 1, clock_in: -1 });
 locationSchema.index({ user_id: 1, recorded_at: -1 });
 locationSchema.index({ session_id: 1, recorded_at: 1 });
@@ -54,6 +69,74 @@ locationSchema.index({ session_id: 1, recorded_at: 1 });
 const User       = mongoose.model('User',       userSchema);
 const Attendance = mongoose.model('Attendance', attendanceSchema);
 const Location = mongoose.model('Location', locationSchema, 'locations');
+
+// ── buildAndSaveGeoJSON ───────────────────────────────────────────────────────
+// Reads all location pings for a session, builds a GeoJSON FeatureCollection,
+// and upserts it into the RouteGeoJSON collection.
+async function buildAndSaveGeoJSON(session, user) {
+  const pings = await Location.find({ session_id: session._id })
+    .sort({ recorded_at: 1 }).lean();
+
+  const coords = [];
+  if (session.clock_in_lat && session.clock_in_lng)
+    coords.push([session.clock_in_lng, session.clock_in_lat]);
+
+  pings.forEach(p => coords.push([p.lng, p.lat]));
+
+  if (session.clock_out_lat && session.clock_out_lng)
+    coords.push([session.clock_out_lng, session.clock_out_lat]);
+
+  if (coords.length < 2) return null;
+
+  const geojson = {
+    type: "FeatureCollection",
+    features: [
+      {
+        type: "Feature",
+        geometry: { type: "LineString", coordinates: coords },
+        properties: {
+          employee_name:  user?.name  ?? null,
+          employee_email: user?.email ?? null,
+          clock_in:       session.clock_in,
+          clock_out:      session.clock_out  ?? null,
+          total_minutes:  session.total_minutes ?? null,
+          ping_count:     pings.length,
+          point_count:    coords.length,
+        },
+      },
+      {
+        type: "Feature",
+        geometry: { type: "Point", coordinates: coords[0] },
+        properties: { label: "Clock In",  time: session.clock_in, marker: "green" },
+      },
+      {
+        type: "Feature",
+        geometry: { type: "Point", coordinates: coords[coords.length - 1] },
+        properties: { label: "Clock Out", time: session.clock_out ?? "Active", marker: "red" },
+      },
+    ],
+  };
+
+  await RouteGeoJSON.findOneAndUpdate(
+    { session_id: session._id },
+    {
+      user_id:    session.user_id,
+      session_id: session._id,
+      geojson,
+      metadata: {
+        ping_count:    pings.length,
+        point_count:   coords.length,
+        total_minutes: session.total_minutes ?? null,
+        clock_in:      session.clock_in,
+        clock_out:     session.clock_out ?? null,
+      },
+      saved_at: new Date(),
+    },
+    { upsert: true, new: true }
+  );
+
+  return geojson;
+}
 // ─── Seed default admin ────────────────────────────────────────────────────
 async function seedAdmin() {
   const exists = await User.findOne({ email: 'admin@company.com' });
