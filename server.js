@@ -128,71 +128,133 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// ── Clock In ───────────────────────────────────────────────────────────────
+// ── Clock In ──────────────────────────────────────────────────────────────────
 app.post('/api/attendance/clock-in', auth, async (req, res) => {
   try {
     const { lat, lng } = req.body;
     const open = await Attendance.findOne({ user_id: req.user.id, clock_out: null });
     if (open) return res.status(400).json({ error: 'Already clocked in' });
-
+ 
     const session = await Attendance.create({
-      user_id: req.user.id,
-      clock_in: new Date(),
+      user_id:      req.user.id,
+      clock_in:     new Date(),
       clock_in_lat: lat,
       clock_in_lng: lng,
     });
-
-    // Save the clock-in point as the first location ping
+ 
+    // Save clock-in point as the first location ping
     await Location.create({
       user_id:    req.user.id,
       session_id: session._id,
-      lat, lng,
-      accuracy: req.body.accuracy || null,
+      lat,
+      lng,
+      accuracy:    req.body.accuracy || null,
+      recorded_at: new Date(),
     });
-
+ 
     res.json({ session_id: session._id, clocked_in: session.clock_in });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
-
-// ── Clock Out — wipes ALL location data for this user after saving summary ─
+ 
+// ── Clock Out ─────────────────────────────────────────────────────────────────
 app.post('/api/attendance/clock-out', auth, async (req, res) => {
   try {
     const { lat, lng } = req.body;
     const session = await Attendance.findOne({ user_id: req.user.id, clock_out: null });
     if (!session) return res.status(400).json({ error: 'Not clocked in' });
-
-    const now = new Date();
+ 
+    const now             = new Date();
     session.clock_out     = now;
-    session.clock_out_lat = lat;
-    session.clock_out_lng = lng;
+    session.clock_out_lat = lat || null;
+    session.clock_out_lng = lng || null;
     session.total_minutes = Math.round((now - session.clock_in) / 60000);
     await session.save();
-
-    // ── DELETE all location pings for this user ──────────────────────────
-    // The attendance record remains untouched for history.
-    // Location data is ephemeral — only needed while the shift is live.
+ 
+    // ── Step 1: Save clock-out point as the final location ping ──────────
+    if (lat && lng) {
+      await Location.create({
+        user_id:    req.user.id,
+        session_id: session._id,
+        lat,
+        lng,
+        accuracy:    null,
+        recorded_at: now,
+      });
+    }
+ 
+    // ── Step 2: Build GeoJSON from all pings and save to RouteGeoJSON ────
+    // Must happen BEFORE deleting location data
+    const user = await User.findById(req.user.id).lean();
+    await buildAndSaveGeoJSON(session.toObject(), user).catch(err =>
+      console.error('⚠️  GeoJSON save failed:', err.message)
+    );
+ 
+    // ── Step 3: NOW delete location pings (route is already saved) ───────
     await Location.deleteMany({ user_id: req.user.id });
-
+ 
     res.json({ session });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
-
-// ── GPS Ping (includes speed + heading for real-world movement feel) ────────
+ 
+// ── Save GPS ping ─────────────────────────────────────────────────────────────
 app.post('/api/location', auth, async (req, res) => {
   try {
-    const { lat, lng, accuracy, speed, heading } = req.body;
-    const session = await Attendance.findOne({ user_id: req.user.id, clock_out: null });
+    const { lat, lng, accuracy, session_id } = req.body;
+ 
+    if (!lat || !lng) return res.status(400).json({ error: 'lat and lng required' });
+ 
+    // Use session_id sent by app — avoids extra DB query every 15 seconds
+    let resolvedSessionId = session_id || null;
+ 
+    // Fallback: look up open session only if app didn't send one
+    if (!resolvedSessionId) {
+      const session = await Attendance.findOne({ user_id: req.user.id, clock_out: null });
+      resolvedSessionId = session?._id || null;
+    }
+ 
     await Location.create({
-      user_id:    req.user.id,
-      session_id: session?._id || null,
-      lat, lng, accuracy,
-      speed:   speed   ?? null,
-      heading: heading ?? null,
+      user_id:     req.user.id,
+      session_id:  resolvedSessionId,
+      lat,
+      lng,
+      accuracy:    accuracy ?? null,
+      recorded_at: new Date(),
     });
+ 
+    res.json({ saved: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+// ── GPS Ping (includes speed + heading for real-world movement feel) ────────
+// AFTER — trusts session_id from app, falls back to DB lookup only if missing
+app.post('/api/location', auth, async (req, res) => {
+  try {
+    const { lat, lng, accuracy, session_id } = req.body;
+
+    if (!lat || !lng) return res.status(400).json({ error: 'lat and lng required' });
+
+    // Use session_id sent by app — avoids extra DB query every 15 seconds
+    let resolvedSessionId = session_id || null;
+    // Fallback: look up open session if app didn't send one
+    if (!resolvedSessionId) {
+      const session = await Attendance.findOne({ user_id: req.user.id, clock_out: null });
+      resolvedSessionId = session?._id || null;
+    }
+
+    await Location.create({
+      user_id:     req.user.id,
+      session_id:  resolvedSessionId,
+      lat,
+      lng,
+      accuracy:    accuracy ?? null,
+      recorded_at: new Date(),
+    });
+
     res.json({ saved: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
