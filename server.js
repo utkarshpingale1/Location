@@ -1,38 +1,3 @@
-"""
-migrate_mongo_to_postgres.py
-────────────────────────────
-Reads every attendance session from MongoDB Atlas,
-flattens the embedded location_trail array,
-and inserts each ping as a row into PostgreSQL.
-
-PostgreSQL table created:
-┌─────────────────┬───────────────────────────────────────────────────────┐
-│ column          │ description                                           │
-├─────────────────┼───────────────────────────────────────────────────────┤
-│ id              │ auto-increment primary key                            │
-│ session_id      │ MongoDB attendance _id (text)                         │
-│ user_id         │ MongoDB user _id (text)                               │
-│ user_name       │ employee name                                         │
-│ user_email      │ employee email                                        │
-│ clock_in        │ session clock-in timestamp                            │
-│ clock_out       │ session clock-out timestamp (null if active)          │
-│ total_minutes   │ shift duration                                        │
-│ lat             │ latitude of this ping                                 │
-│ lng             │ longitude of this ping                                │
-│ accuracy        │ GPS accuracy in metres                                │
-│ speed           │ speed at ping time                                    │
-│ heading         │ direction at ping time                                │
-│ recorded_at     │ exact timestamp of this ping                          │
-│ ping_index      │ position of this ping in the trail (0 = first)       │
-└─────────────────┴───────────────────────────────────────────────────────┘
-
-Usage:
-    pip install pymongo psycopg2-binary python-dotenv
-    python migrate_mongo_to_postgres.py
-
-    # or with env vars inline:
-    MONGO_URI="mongodb+srv://..." DATABASE_URL="postgresql://..." python migrate_mongo_to_postgres.py
-"""
 
 import os
 import sys
