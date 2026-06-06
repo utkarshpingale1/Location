@@ -468,7 +468,50 @@ app.get('/api/admin/location-trail/user/:user_id', auth, admin, async (req, res)
     res.status(500).json({ error: e.message });
   }
 });
+// GET /api/admin/locations/grouped
+// One document per session with all coordinates as an array
+app.get('/api/admin/locations/grouped', auth, admin, async (req, res) => {
+  try {
+    const grouped = await Location.aggregate([
+      // Sort pings by time BEFORE grouping so coordinates are in order
+      { $sort: { recorded_at: 1 } },
+      {
+        $group: {
+          _id:        '$session_id',
+          user_id:    { $first: '$user_id' },
+          ping_count: { $sum: 1 },
+          first_ping: { $first: '$recorded_at' },
+          last_ping:  { $last:  '$recorded_at' },
+          coordinates: {
+            $push: {
+              lat:         '$lat',
+              lng:         '$lng',
+              recorded_at: '$recorded_at',
+            },
+          },
+        },
+      },
+      // Most recent session first
+      { $sort: { first_ping: -1 } },
+      // Clean output — rename _id to session_id
+      {
+        $project: {
+          _id:         0,
+          session_id:  '$_id',
+          user_id:     1,
+          ping_count:  1,
+          first_ping:  1,
+          last_ping:   1,
+          coordinates: 1,
+        },
+      },
+    ]);
 
+    res.json(grouped);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 // ── Start ──────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server running on port ${PORT}`));
