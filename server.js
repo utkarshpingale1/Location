@@ -53,8 +53,7 @@ locationSchema.index({ session_id: 1, recorded_at: 1 });
 
 const User       = mongoose.model('User',       userSchema);
 const Attendance = mongoose.model('Attendance', attendanceSchema);
-const Location   = mongoose.model('Location',   locationSchema);
-
+const Location = mongoose.model('Location', locationSchema, 'locations');
 // ─── Seed default admin ────────────────────────────────────────────────────
 async function seedAdmin() {
   const exists = await User.findOne({ email: 'admin@company.com' });
@@ -164,36 +163,34 @@ app.post('/api/attendance/clock-out', auth, async (req, res) => {
     const { lat, lng } = req.body;
     const session = await Attendance.findOne({ user_id: req.user.id, clock_out: null });
     if (!session) return res.status(400).json({ error: 'Not clocked in' });
- 
+
     const now             = new Date();
     session.clock_out     = now;
     session.clock_out_lat = lat || null;
     session.clock_out_lng = lng || null;
     session.total_minutes = Math.round((now - session.clock_in) / 60000);
     await session.save();
- 
-    // ── Step 1: Save clock-out point as the final location ping ──────────
+
+    // ── STEP 1: Add final clock-out ping ──────────────────────────────────
     if (lat && lng) {
       await Location.create({
-        user_id:    req.user.id,
-        session_id: session._id,
-        lat,
-        lng,
+        user_id:     req.user.id,
+        session_id:  session._id,
+        lat, lng,
         accuracy:    null,
         recorded_at: now,
       });
     }
- 
-    // ── Step 2: Build GeoJSON from all pings and save to RouteGeoJSON ────
-    // Must happen BEFORE deleting location data
+
+    // ── STEP 2: Build + save GeoJSON BEFORE deleting pings ───────────────
     const user = await User.findById(req.user.id).lean();
     await buildAndSaveGeoJSON(session.toObject(), user).catch(err =>
-      console.error('⚠️  GeoJSON save failed:', err.message)
+      console.error('⚠️ GeoJSON save failed:', err.message)
     );
- 
-    // ── Step 3: NOW delete location pings (route is already saved) ───────
+
+    // ── STEP 3: Delete pings only AFTER route is saved ───────────────────
     await Location.deleteMany({ user_id: req.user.id });
- 
+
     res.json({ session });
   } catch (e) {
     res.status(500).json({ error: e.message });
